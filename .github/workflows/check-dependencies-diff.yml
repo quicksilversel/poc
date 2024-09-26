@@ -1,0 +1,139 @@
+name: Detect changes in dependencies
+
+on: push
+
+jobs:
+  scan-dependencies:
+    runs-on: ubuntu-latest
+    outputs:
+      changes_detected: ${{ steps.diff-check.outputs.changes_detected }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Cache node modules
+        id: cache-npm
+        uses: actions/cache@v4
+        env:
+          cache-name: cache-node-modules
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-build-${{ env.cache-name }}-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-build-${{ env.cache-name }}-
+
+      - name: Clean Install dependencies
+        run: npm ci
+
+      - name: Process packages/index.ts
+        run: |
+          git config --global user.email "actions@github.com"
+          git config --global user.name "GitHub Actions"
+          git config --global pull.rebase false 
+          git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}
+
+          git fetch origin master feature/root-packages --depth=1
+          git checkout feature/root-packages
+
+          echo "[" > exports.json
+          grep -oE "from '([^']+)'" src/pages/villa/index.ts | \
+          sed "s/from '//;s/'//;s/^/\"/;s/$/\/index.ts\"/;s/@/src/" | \
+          paste -sd, - >> exports.json  
+          echo "]" >> exports.json
+
+      - name: Generate Dependency Tree
+        run: |
+          echo "[]" > dependencies.json
+
+          TEMP_FILE="temp.json"
+          echo "[]" > $TEMP_FILE  
+
+            for FILE in $(jq -r '.[]' exports.json); do
+              npx depcruise --include-only "^src/" --output-type json "$FILE" | jq '.modules' > single.json || echo "Failed to process $FILE"
+              jq -s '.[0] + .[1]' $TEMP_FILE single.json > temp_combined.json && mv temp_combined.json $TEMP_FILE
+            done
+
+          mv $TEMP_FILE dependencies.json
+
+          if [[ -f single.json ]]; then
+            rm single.json
+          fi
+
+        shell: bash
+
+      - name: Extract Dependent Files
+        id: extract-resolved
+        run: |
+          DEPENDENCIES=$(jq -r '[.[] | .dependencies[].resolved] | unique | join(" ")' dependencies.json)
+          echo "$DEPENDENCIES" > temp_dependencies.txt
+        shell: bash
+
+      - name: Check For Changes In Dependent Files between Develop And feature/root-packages
+        id: check-diff
+        run: |
+          DEPENDENCIES=$(<temp_dependencies.txt)
+
+          if [ -z "$DEPENDENCIES" ]; then
+            echo "No dependencies found to check for differences."
+            echo "changes_detected=false" >> $GITHUB_ENV
+          else
+            DIFF=$(git diff origin/master..origin/feature/root-packages  --name-only -- $DEPENDENCIES)
+
+            if [ -z "$DIFF" ]; then
+              echo "No changes detected in dependencies between develop and feature/root-packages."
+              echo "changes_detected=false" >> $GITHUB_ENV
+            else
+              echo "Changes detected in dependencies between develop and feature/root-packages:"
+              echo "$DIFF"
+              echo "changes_detected=true" >> $GITHUB_ENV
+
+              {
+                echo 'DIFF_FILES<<EOF'
+                echo "$DIFF"
+                echo 'EOF'
+              } >> $GITHUB_ENV
+            fi
+          fi
+        shell: bash
+
+      - name: Remove Temporary Files
+        run: |
+          rm -f dependencies.json
+          rm -f exports.json
+          rm -f temp_dependencies.txt
+        shell: bash
+
+      - name: Send Message To Slack
+        if: env.changes_detected == 'true'
+        uses: slackapi/slack-github-action@v1.27.0
+        with:
+          payload: |
+            {
+              "text": "Changes detected in web-front-package dependencies",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "test"
+                  }
+                },
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "${{ env.DIFF_FILES }} \n"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL_PROMO_DEV_NOTICE }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
