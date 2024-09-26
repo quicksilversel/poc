@@ -1,6 +1,6 @@
 name: Detect changes in dependencies
 
-on: push
+on: workflow_dispatch
 
 jobs:
   scan-dependencies:
@@ -39,11 +39,11 @@ jobs:
           git config --global pull.rebase false 
           git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}
 
-          git fetch origin master feature/root-packages --depth=1
+          git fetch origin main feature/root-packages --depth=1
           git checkout feature/root-packages
 
           echo "[" > exports.json
-          grep -oE "from '([^']+)'" src/pages/villa/index.ts | \
+          grep -oE "from '([^']+)'" src/components/TestComponent/index.ts | \
           sed "s/from '//;s/'//;s/^/\"/;s/$/\/index.ts\"/;s/@/src/" | \
           paste -sd, - >> exports.json  
           echo "]" >> exports.json
@@ -84,7 +84,7 @@ jobs:
             echo "No dependencies found to check for differences."
             echo "changes_detected=false" >> $GITHUB_ENV
           else
-            DIFF=$(git diff origin/master..origin/feature/root-packages  --name-only -- $DEPENDENCIES)
+            DIFF=$(git diff origin/main..origin/feature/root-packages  --name-only -- $DEPENDENCIES)
 
             if [ -z "$DIFF" ]; then
               echo "No changes detected in dependencies between develop and feature/root-packages."
